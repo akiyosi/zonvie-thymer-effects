@@ -1,7 +1,7 @@
 // Thymer-style edit effects for Zonvie.
 //
-// Measured off the demo video frame by frame (tmp/thymer/type_zoom.png and
-// del_zoom.png, 60 fps, 74 px cells):
+// Measured frame by frame off Thymer's demo video of typing and deleting
+// (60 fps, 74 px cells); "the demo" below always means that video:
 //
 //   1. Every glyph that was just typed or just deleted gets ONE soft "smoke
 //      puff": a round, blurred blob in the ink colour, about half a cell
