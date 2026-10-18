@@ -38,6 +38,13 @@
 // which the native pass painted in the cell background colour; a
 // post-process shader does not know that colour, so a block is drawn solid.
 
+// ---- switches ------------------------------------------------------------
+// Turn each effect on or off. The cursor's shear and stretch are part of
+// drawing the cursor and always stay on.
+const bool ENABLE_SMOKE = true;  // smoke puffs on typed and deleted glyphs
+const bool ENABLE_TRAIL = true;  // streak when the cursor jumps
+const bool ENABLE_GLOW  = true;  // cursor glow on dark themes
+
 // ---- tunables -------------------------------------------------------------
 
 // Smoke puffs.
@@ -252,7 +259,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // (a typed puff rises out of its cell into the row above it) and the row
     // above (a blob swells downward past its cell's bottom edge). Missing
     // either row cuts the haze off flat at a cell boundary.
-    if ((iTime - iTimeLastEdit) <= PUFF_DELAY_MAX_S + PUFF_LIFE_MAX_S &&
+    if (ENABLE_SMOKE && (iTime - iTimeLastEdit) <= PUFF_DELAY_MAX_S + PUFF_LIFE_MAX_S &&
         iCellSize.x > 0.0 && iCellSize.y > 0.0) {
         vec2 cs = iCellSize;
         vec2 cellF = (fragCoord - iGridOrigin) / cs;
@@ -423,7 +430,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // A jump, as opposed to typing: only these hide the cursor and streak.
     bool jumped = iCellSize.y > 0.0 && iCurrentCursor.z > 0.0 &&
                   iPreviousCursor.z > 0.0 && dot(seg, seg) > minLen * minLen;
-    if (jumped && trailAge >= 0.0 && trailAge <= TRAIL_LIFE_S) {
+    if (ENABLE_TRAIL && jumped && trailAge >= 0.0 && trailAge <= TRAIL_LIFE_S) {
         {
             float segLen2 = dot(seg, seg);
             float hProj = clamp(dot(fragCoord - pa, seg) / segLen2, 0.0, 1.0);
@@ -466,7 +473,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // The theme is judged from the background of the cursor's own cell
     // (the frontend leaves the cursor to this shader, so that cell still
     // shows its plain background).
-    if (iCursorVisible != 0 && iCurrentCursor.z > 0.0 && iCurrentCursor.w > 0.0 &&
+    if (ENABLE_GLOW && iCursorVisible != 0 && iCurrentCursor.z > 0.0 && iCurrentCursor.w > 0.0 &&
         iCellSize.y > 0.0) {
         vec2 gc = vec2(iCurrentCursor.x + iCurrentCursor.z * 0.5,
                        iCurrentCursor.y - iCurrentCursor.w * 0.5);
