@@ -134,6 +134,15 @@ const float SHEAR_MAX        = 0.10;  // shear amount / cursor height
 const float SHEAR_DIR        = 1.0;   // +1: top edge leads
 const float STRETCH_MAX      = 0.55;  // symmetric stretch while moving, fraction of width
 const float CURSOR_RADIUS_PX = 1.5;
+// Brightness of the cursor during the off phase of a `guicursor` blink, so
+// the blink dims the cursor instead of removing it; 0 hides it as Neovim
+// does. The colour is scaled, not blended with the background: Thymer's
+// dark-theme cursor keeps its hue and drops to ~0.66 in every channel, while
+// a blend toward a dark background turns a warm cursor muddy grey.
+// iCursorVisible is also 0 where no cursor is shown at all (an inactive
+// external window, a cursor Neovim hid), so above 0 a dimmed cursor stays
+// at the last position there too.
+const float CURSOR_BLINK_OFF_LEVEL = 0.66;
 
 // Cursor glow. A dark theme only: the cursor lights the cells around it in
 // its own colour while it is shown, so it goes on and off with Neovim's
@@ -142,6 +151,7 @@ const float GLOW_SIGMA_CELL  = 1.6;   // Gaussian sigma / cell height
 const float GLOW_REACH_SIGMA = 3.0;   // fragments further than this many sigmas skip the glow
 const float GLOW_MAX         = 0.16;  // peak added light at the cursor's centre
 const float GLOW_DARK_LUMA   = 0.40;  // background luminance below which the theme counts as dark
+const float GLOW_WHITEN      = 0.35;  // how far the light is pushed from the cursor colour toward white
 
 // ---- helpers --------------------------------------------------------------
 
@@ -488,7 +498,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             float luma = dot(bgStraight, vec3(0.2126, 0.7152, 0.0722));
             if (luma < GLOW_DARK_LUMA) {
                 float g = exp(-0.5 * dot(dg, dg) / (sigma * sigma));
-                vec3 light = iCurrentCursorColor.rgb * (GLOW_MAX * g);
+                // A lamp's light reads paler than the lamp itself: a fully
+                // saturated cursor colour stains the text instead of lighting it.
+                vec3 lightColor = mix(iCurrentCursorColor.rgb, vec3(1.0), GLOW_WHITEN);
+                vec3 light = lightColor * (GLOW_MAX * g);
 #ifdef ZONVIE_PRESERVE_ALPHA
                 // Scaled by the pixel's alpha so the result stays a valid
                 // premultiplied colour on a translucent window.
@@ -512,8 +525,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // The cursor is drawn at its new position immediately, streak or no
     // streak. (The demo withholds it for the streak's whole life and only
     // materialises it afterwards; that lag is not wanted here.)
+    float cursorLevel = iCursorVisible != 0 ? 1.0 : CURSOR_BLINK_OFF_LEVEL;
     bool shaderDrawsCursor =
-        iCursorVisible != 0 &&
+        cursorLevel > 0.0 &&
         iCurrentCursor.z > 0.0 && iCurrentCursor.w > 0.0;
 
     if (shaderDrawsCursor) {
@@ -569,8 +583,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         // vanish in Normal mode. Guessing the colour is worse than not drawing
         // the glyph, so this draws none. Restoring the glyph properly needs
         // the real colour as a uniform (Ghostty exposes iCursorText).
-        vec3 cursorPaint = iCurrentCursorColor.rgb;
-        base = mix(base, cursorPaint, a * ca);
+        vec3 cursorPaint = iCurrentCursorColor.rgb * cursorLevel;
+        float cover = a * ca;
+        base = mix(base, cursorPaint, cover);
+        // Opaque where it is drawn, like the smoke: on a translucent window
+        // the blurred backdrop would otherwise wash the cursor out, and the
+        // dimmed blink-off cursor most of all.
+        alpha = mix(alpha, 1.0, cover);
     }
 
     fragColor = vec4(base, alpha);
