@@ -65,6 +65,19 @@ const float PUFF_SHAPE_GAIN  = 1.4;   // typed puff: blurred glyph density -> op
 const float PUFF_SHAPE_BLOB_MIN = 0.10; // weight of the soft blob under the glyph copy at birth
 const float PUFF_SHAPE_BLOB_MAX = 0.70; // ... and at the end: the shape melts into a blob
 const float PUFF_GROW        = 0.8;   // deleted puff: blob radius grows by this fraction over its life
+const float PUFF_SKIP_EPS    = 1e-3;  // a puff contributing less than this to a fragment is skipped
+
+// Typed-puff disc blur: 1 centre tap plus 3 rings of 8. Ring r sits at
+// r/3 of the blur radius with weight exp(-0.5 * (r / 1.8)^2); the sum
+// counts every tap, inside the cell or not.
+const float PUFF_RING_W[4] = float[4](1.0, 0.856997, 0.539408, 0.249352);
+const float PUFF_RING_W_SUM = 14.166056;
+const vec2 PUFF_DIR_EVEN[8] = vec2[8](
+    vec2( 1.0, 0.0), vec2( 0.707107,  0.707107), vec2(0.0,  1.0), vec2(-0.707107,  0.707107),
+    vec2(-1.0, 0.0), vec2(-0.707107, -0.707107), vec2(0.0, -1.0), vec2( 0.707107, -0.707107));
+const vec2 PUFF_DIR_ODD[8] = vec2[8](
+    vec2( 0.923880,  0.382683), vec2( 0.382683,  0.923880), vec2(-0.382683,  0.923880), vec2(-0.923880,  0.382683),
+    vec2(-0.923880, -0.382683), vec2(-0.382683, -0.923880), vec2( 0.382683, -0.923880), vec2( 0.923880, -0.382683));
 
 // Cursor jump trail. Measured off the demo at 4.28-4.48 s, where the cursor
 // leaves Ln 1 Col 1 for Ln 6 Col 19: a STRAIGHT streak joining the two
@@ -331,80 +344,90 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                 float dis = pow(t, mix(0.6, 1.8, h3.y));
                 float fadeExp = mix(0.8, 2.0, h3.z);
                 float fadeIn = smoothstep(0.0, PUFF_FADE_IN_S, local);
+                // Fade: linear-ish, a touch slower at first so a fresh puff
+                // reads at full strength for a few frames.
+                float amp = PUFF_MAX * pow(1.0 - t, fadeExp) * (0.75 + 0.25 * h.z) * fadeIn;
+                if (amp < PUFF_SKIP_EPS) continue;
+
+                // Where the puff sits. Typed: above the glyph, rising. Deleted:
+                // on the glyph's old spot, barely moving. Both placements are
+                // computed before the cell is probed for ink, so a fragment
+                // that neither could reach skips the probe's taps.
+                //
+                // On the grid's top row there is no room above: a small
+                // external window (an ext float with one or two rows) would
+                // push the puff out of its drawable and the typed glyph would
+                // seem to get no smoke at all. Keep it inside the cell there,
+                // hugging the glyph's upper half.
+                float rise = (cell.y < 0.5) ? 0.04 : PUFF_RISE_CELL * (0.6 + 0.4 * h.y);
+                float drift = (cell.y < 0.5) ? 0.03 : PUFF_DRIFT_CELL;
+                vec2 offT = vec2((h.x - 0.5) * PUFF_JITTER_X * cs.x,
+                                 -(rise + drift * t) * cs.y);
+                vec2 offD = vec2((h.x - 0.5) * 0.6 * PUFF_JITTER_X * cs.x,
+                                 ((h.y - 0.5) * 0.2 - 0.08 * t) * cs.y);
+                // The blob swells as it dissipates.
+                float sigma = (PUFF_SIGMA_CELL + (h.z - 0.5) * PUFF_SIGMA_JIT) * cs.y * (1.0 + PUFF_GROW * spread * dis);
+                // Slightly taller than wide, like the demo's blobs.
+                vec2 sig2 = vec2(sigma * 0.85, sigma);
+                vec2 dT = (fragCoord - centre - offT) / sig2;
+                vec2 dD = (fragCoord - centre - offD) / sig2;
+                float gT = exp(-0.5 * dot(dT, dT));
+                float gD = exp(-0.5 * dot(dD, dD));
+                float blobW = mix(PUFF_SHAPE_BLOB_MIN, PUFF_SHAPE_BLOB_MAX, dis);
+
+                // Typed puff: the shape of the glyph itself, sampled at this
+                // pixel shifted back by the puff offset through a small disc
+                // blur. Taps are confined to the source cell so a neighbour's
+                // glyph never leaks in, which also means a `src` further than
+                // the blur radius outside it can only sum to zero. Born almost
+                // sharp, then the blur radius widens with age and the soft
+                // blob takes over: the haze dissipates instead of merely
+                // fading.
+                vec2 cellMin = iGridOrigin + cell * cs;
+                vec2 cellMax = cellMin + cs;
+                float rB = mix(PUFF_SHAPE_BLUR_MIN, PUFF_SHAPE_BLUR_MAX * spread, dis) * cs.y;
+                vec2 src = fragCoord - offT;
+                bool inBlur = src.x >= cellMin.x - rB && src.x < cellMax.x + rB &&
+                              src.y >= cellMin.y - rB && src.y < cellMax.y + rB;
+                if (!inBlur && gD * amp < PUFF_SKIP_EPS && blobW * gT * amp < PUFF_SKIP_EPS) continue;
+
                 // THIS cell's own background, not the row's majority: a cell
                 // under `cursorcolumn`, `hlsearch`, MatchParen or Visual has
                 // a background of its own, and measuring it against the row
                 // paper reported the whole cell as ink — the puff came out a
                 // solid rectangle in the highlight colour instead of a copy
                 // of the glyph.
-                vec2 cellMin0 = iGridOrigin + cell * cs;
-                vec3 cellPaper = texture(iChannel0, (cellMin0 + cs * 0.08) / iResolution.xy).rgb;
+                vec3 cellPaper = texture(iChannel0, (cellMin + cs * 0.08) / iResolution.xy).rgb;
                 bool typed = cellHasInk(centre, cellPaper);
 
-                // Where the puff sits. Typed: above the glyph, rising. Deleted:
-                // on the glyph's old spot, barely moving.
-                vec2 off;
+                float g = gD;
                 if (typed) {
-                    // On the grid's top row there is no room above: a
-                    // small external window (an ext float with one or two
-                    // rows) would push the puff out of its drawable and the
-                    // typed glyph would seem to get no smoke at all. Keep it
-                    // inside the cell there, hugging the glyph's upper half.
-                    float rise = (cell.y < 0.5) ? 0.04 : PUFF_RISE_CELL * (0.6 + 0.4 * h.y);
-                    float drift = (cell.y < 0.5) ? 0.03 : PUFF_DRIFT_CELL;
-                    off = vec2((h.x - 0.5) * PUFF_JITTER_X * cs.x,
-                               -(rise + drift * t) * cs.y);
-                } else {
-                    off = vec2((h.x - 0.5) * 0.6 * PUFF_JITTER_X * cs.x,
-                               ((h.y - 0.5) * 0.2 - 0.08 * t) * cs.y);
-                }
-                vec2 pc = centre + off;
-                // The blob swells as it dissipates.
-                float sigma = (PUFF_SIGMA_CELL + (h.z - 0.5) * PUFF_SIGMA_JIT) * cs.y * (1.0 + PUFF_GROW * spread * dis);
-                // Slightly taller than wide, like the demo's blobs.
-                vec2 d = (fragCoord - pc) / vec2(sigma * 0.85, sigma);
-                float g = exp(-0.5 * dot(d, d));
-                if (typed) {
-                    // Shape of the typed glyph itself: sample the cell's ink
-                    // at this pixel shifted back by the puff offset, through
-                    // a small disc blur. Taps are confined to the source
-                    // cell so a neighbour's glyph never leaks in. The soft
-                    // Gaussian blob is kept at low weight for the smoky edge.
-                    // Born almost sharp, then the blur radius widens with
-                    // age and the soft blob takes over: the glyph-shaped
-                    // haze dissipates instead of merely fading.
-                    float rB = mix(PUFF_SHAPE_BLUR_MIN, PUFF_SHAPE_BLUR_MAX * spread, dis) * cs.y;
-                    vec2 src = fragCoord - off;
-                    vec2 cellMin = cellMin0;
-                    vec2 cellMax = cellMin + cs;
-                    // Every tap is confined to the source cell, so a `src`
-                    // further than the blur radius outside it can only sum to
-                    // zero. Most fragments of the 5x3 neighbourhood are in
-                    // that region; skipping them is 25 taps saved each.
                     float density = 0.0;
-                    if (src.x >= cellMin.x - rB && src.x < cellMax.x + rB &&
-                        src.y >= cellMin.y - rB && src.y < cellMax.y + rB) {
-                        float inkSum = 0.0, wSum = 0.0;
-                        for (int ring = 0; ring <= 3; ++ring) {
+                    if (inBlur) {
+                        // Ring weights exp(-0.5 * (ring / 1.8)^2) do not depend
+                        // on rB, and every tap counts toward the weight sum
+                        // whether or not it lands in the cell, so the sum is a
+                        // constant too. Rings 1 and 3 sit half a step (22.5
+                        // degrees) round from rings 0 and 2.
+                        float inkSum = 0.0;
+                        if (src.x >= cellMin.x && src.y >= cellMin.y && src.x < cellMax.x && src.y < cellMax.y) {
+                            vec3 c = texture(iChannel0, src / iResolution.xy).rgb;
+                            inkSum += smoothstep(0.08, 0.30, distance(c, cellPaper));
+                        }
+                        for (int ring = 1; ring <= 3; ++ring) {
                             float rr = rB * float(ring) / 3.0;
-                            float w = exp(-0.5 * (rr / (rB * 0.6)) * (rr / (rB * 0.6)));
-                            int n = (ring == 0) ? 1 : 8;
-                            for (int i = 0; i < n; ++i) {
-                                float a = 6.2831853 * (float(i) + 0.5 * float(ring)) / 8.0;
-                                vec2 tp = src + vec2(cos(a), sin(a)) * rr;
-                                wSum += w;
+                            float w = PUFF_RING_W[ring];
+                            for (int i = 0; i < 8; ++i) {
+                                vec2 tp = src + ((ring == 2) ? PUFF_DIR_EVEN[i] : PUFF_DIR_ODD[i]) * rr;
                                 if (tp.x < cellMin.x || tp.y < cellMin.y || tp.x >= cellMax.x || tp.y >= cellMax.y) continue;
                                 vec3 c = texture(iChannel0, tp / iResolution.xy).rgb;
                                 inkSum += w * smoothstep(0.08, 0.30, distance(c, cellPaper));
                             }
                         }
-                        density = inkSum / max(wSum, 1e-5);
+                        density = inkSum / PUFF_RING_W_SUM;
                     }
-                    g = clamp(density * PUFF_SHAPE_GAIN + mix(PUFF_SHAPE_BLOB_MIN, PUFF_SHAPE_BLOB_MAX, dis) * g, 0.0, 1.0);
+                    g = clamp(density * PUFF_SHAPE_GAIN + blobW * gT, 0.0, 1.0);
                 }
-                // Fade: linear-ish, a touch slower at first so a fresh puff
-                // reads at full strength for a few frames.
-                float amp = PUFF_MAX * pow(1.0 - t, fadeExp) * (0.75 + 0.25 * h.z) * fadeIn;
                 acc = 1.0 - (1.0 - acc) * (1.0 - g * amp);
             }
         }
