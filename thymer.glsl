@@ -44,8 +44,30 @@
 const bool ENABLE_SMOKE = true;  // smoke puffs on typed and deleted glyphs
 const bool ENABLE_TRAIL = true;  // streak when the cursor jumps
 const bool ENABLE_GLOW  = true;  // cursor glow on dark themes
+const bool ENABLE_BOXES = true;  // task checkboxes
 
 // ---- tunables -------------------------------------------------------------
+
+// Task checkboxes. Zonvie hands the shader the codepoint of every cell
+// (iCellText), so a task prefix is matched by its text, not its pixels: a
+// `- [ ]`, `- [x]` or `- [!]` (also `*` and `+` bullets, and `X`) with a
+// blank before the bullet. The five cells from the bullet to `]` are
+// repainted as one box on the paper colour of their row, and the text of a
+// done task is faded and struck through.
+const bool  BOX_STRIKE       = true;   // grey out and strike through done tasks
+const int   BOX_STRIKE_SCAN  = 240;    // how far left a fragment looks for its `- [x]` (stops at the grid's edge)
+const float BOX_STRIKE_FADE  = 0.45;   // how far done text fades toward the paper
+const float BOX_STRIKE_Y     = 0.57;   // strike line centre / cell height
+const float BOX_STRIKE_W     = 0.035;  // strike line half width / cell height
+const float BOX_INK_THRESH   = 0.15;   // colour distance from paper that counts as ink (fading only)
+const float BOX_SIZE         = 0.62;   // box side / cell height
+const float BOX_CENTRE       = 0.68;   // box centre / five-cell width
+const vec3  BOX_COLOR_OPEN   = vec3(0.25, 0.60, 0.60);   // teal outline
+const vec3  BOX_COLOR_DONE   = vec3(0.25, 0.60, 0.60);   // teal fill, white tick
+const vec3  BOX_COLOR_URGENT = vec3(0.72, 0.20, 0.20);   // red outline and "!"
+const float BOX_RADIUS       = 0.16;   // corner radius / box side
+const float BOX_STROKE       = 0.14;   // outline width / box side
+const float BOX_AA_PX        = 0.9;    // edge softness in pixels
 
 // Smoke puffs.
 const float PUFF_LIFE_MIN_S  = 0.10;  // per-puff life is drawn uniformly from [MIN, MAX]
@@ -265,6 +287,99 @@ void estimatePaperInk(vec2 c0, vec2 cs, vec3 here, out vec3 paper, out vec3 ink)
     }
 }
 
+// Distance from p to the segment ab.
+float sdSegment(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a, ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * h);
+}
+
+vec3 cornerAt(vec2 cellMin, vec2 cs) {
+    return texture(iChannel0, (cellMin + cs * 0.08) / iResolution.xy).rgb;
+}
+
+bool isBlankCp(uint c) {
+    return c == 0x20u || c == 0u;  // a space, or a cell with no text
+}
+
+// A window separator or a float's border: Neovim draws both with
+// box-drawing characters (the border into the float's own grid).
+bool isBorderCp(uint c) {
+    return c >= 0x2500u && c <= 0x257Fu;
+}
+
+// What may sit before a bullet: a blank or a border.
+bool canPrecedeBullet(uint c) {
+    return isBlankCp(c) || isBorderCp(c);
+}
+
+// Does a task run start at the cell `bullet`? Returns 0 for none, 1 open,
+// 2 done, 3 urgent. Bullet, space, `[`, mark, `]`, with a blank, a border
+// or the grid's edge before the bullet so `a-[x]` is left alone. Only that one
+// cell is checked: a float shares the text plane with the window under it,
+// so the cells further left may belong to another window's line.
+int taskRunAt(ivec2 bullet) {
+    uint b = zonvieCellTextAt(bullet);
+    if (b != 0x2Du && b != 0x2Au && b != 0x2Bu) return 0;  // - * +
+    if (zonvieCellTextAt(bullet + ivec2(1, 0)) != 0x20u) return 0;
+    if (zonvieCellTextAt(bullet + ivec2(2, 0)) != 0x5Bu) return 0;  // [
+    if (zonvieCellTextAt(bullet + ivec2(4, 0)) != 0x5Du) return 0;  // ]
+    uint m = zonvieCellTextAt(bullet + ivec2(3, 0));
+    int kind = m == 0x20u ? 1 : (m == 0x78u || m == 0x58u) ? 2 : m == 0x21u ? 3 : 0;  // ' ' x X !
+    if (kind == 0) return 0;
+    if (bullet.x > 0 && !canPrecedeBullet(zonvieCellTextAt(bullet - ivec2(1, 0)))) return 0;
+    return kind;
+}
+
+// Paint the task box for the cell with top-left `cellMin`. `q` is the
+// fragment's offset from the cell centre in pixels. Returns the painted
+// colour over `paper`.
+vec3 paintBox(int kind, vec2 q, float side, vec3 paper) {
+    float hs = side * 0.5;
+    float aa = BOX_AA_PX;
+    float dBox = sdRoundBox(q, vec2(hs), BOX_RADIUS * side);
+    float fill = 1.0 - smoothstep(-aa, aa, dBox);
+    float ring = fill * smoothstep(-aa, aa, dBox + BOX_STROKE * side);
+    vec3 col = paper;
+    if (kind == 2) {
+        col = mix(col, BOX_COLOR_DONE, fill);
+        // Tick: two strokes, drawn in the paper colour. +y is down.
+        vec2 a = vec2(-0.30, -0.02) * side;
+        vec2 b = vec2(-0.08, 0.22) * side;
+        vec2 c = vec2(0.32, -0.22) * side;
+        float dTick = min(sdSegment(q, a, b), sdSegment(q, b, c)) - 0.07 * side;
+        col = mix(col, paper, 1.0 - smoothstep(-aa, aa, dTick));
+    } else {
+        vec3 inkCol = kind == 3 ? BOX_COLOR_URGENT : BOX_COLOR_OPEN;
+        col = mix(col, inkCol, ring);
+        if (kind == 3) {
+            // "!": a bar and a dot.
+            float dBar = sdSegment(q, vec2(0.0, -0.28 * side), vec2(0.0, 0.06 * side)) - 0.07 * side;
+            float dDot = length(q - vec2(0.0, 0.26 * side)) - 0.08 * side;
+            float mark = 1.0 - smoothstep(-aa, aa, min(dBar, dDot));
+            col = mix(col, inkCol, mark);
+        }
+    }
+    return col;
+}
+
+// Is this cell on the text of a done task? Scans left for a `- [x]` run
+// (the text starts six cells after its bullet), to the grid's left edge or
+// the nearest window border; one tap per step gates the full match.
+bool onDoneTask(ivec2 cell) {
+    for (int j = 1; j < BOX_STRIKE_SCAN + 6; ++j) {
+        ivec2 bullet = cell - ivec2(j, 0);
+        if (bullet.x < 0) return false;
+        uint b = zonvieCellTextAt(bullet);
+        // A window separator or float border: the cells beyond it belong
+        // to another window's line.
+        if (isBorderCp(b)) return false;
+        if (j < 6 || (b != 0x2Du && b != 0x2Au && b != 0x2Bu)) continue;
+        if (taskRunAt(bullet) == 2) return true;
+    }
+    return false;
+}
+
 // ---- main -----------------------------------------------------------------
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
@@ -275,6 +390,48 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float alpha = sharp.a;
 
     bool cursorActive = (iTime - iTimeCursorChange) <= SHEAR_DURATION_S;
+
+    // ---- task checkboxes -------------------------------------------------
+    // This fragment may sit in any of the five cells of a `- [?]` run; try
+    // each start. Everything is measured in the space the row is drawn in
+    // (`p`): mid smooth-scroll a row sits zonvieRowOffset below its grid
+    // rect, and the box has to ride with its text. The paper is the corner
+    // of the fragment's own cell, sampled where that cell is drawn.
+    if (ENABLE_BOXES && iCellSize.x > 0.0 && iCellSize.y > 0.0) {
+        vec2 cs = iCellSize;
+        float rowOff = zonvieRowOffset(fragCoord);
+        vec2 p = fragCoord - vec2(0.0, rowOff);
+        vec2 c0 = floor((p - iGridOrigin) / cs);
+        ivec2 cell = ivec2(c0);
+        vec2 cellMin = iGridOrigin + c0 * cs;
+        vec3 paper = cornerAt(cellMin + vec2(0.0, rowOff), cs);
+        for (int k = 0; k < 5; ++k) {
+            ivec2 bullet = cell - ivec2(k, 0);
+            if (bullet.x < 0) break;
+            int kind = taskRunAt(bullet);
+            if (kind == 0) continue;
+            vec2 bulletMin = cellMin - vec2(float(k) * cs.x, 0.0);
+            float width = 5.0 * cs.x;
+            float side = BOX_SIZE * cs.y;
+            vec2 q = p - (bulletMin + vec2(width * BOX_CENTRE, cs.y * 0.5));
+            base = paintBox(kind, q, side, paper);
+            break;
+        }
+        // Done-task text: fade the ink and strike through it. The line
+        // stops after two blank cells in a row, where the text ends.
+        if (BOX_STRIKE && base == sharp.rgb && onDoneTask(cell)) {
+            bool ink = distance(sharp.rgb, paper) > BOX_INK_THRESH;
+            uint here = zonvieCellTextAt(cell);
+            uint next = zonvieCellTextAt(cell + ivec2(1, 0));
+            bool textHere = !isBorderCp(here) &&
+                            (ink || !isBlankCp(here) || (!isBlankCp(next) && !isBorderCp(next)));
+            if (ink) base = mix(sharp.rgb, paper, BOX_STRIKE_FADE);
+            float relY = (p.y - cellMin.y) / cs.y;
+            if (textHere && abs(relY - BOX_STRIKE_Y) < BOX_STRIKE_W) {
+                base = mix(paper, vec3(0.45), 0.5);
+            }
+        }
+    }
 
     // ---- smoke puffs -----------------------------------------------------
     // Gate on the global "last edit" time first so idle frames pay nothing,
