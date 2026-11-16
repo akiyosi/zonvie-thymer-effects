@@ -364,9 +364,12 @@ vec3 paintBox(int kind, vec2 q, float side, vec3 paper) {
 }
 
 // Is this cell on the text of a done task? Scans left for a `- [x]` run
-// (the text starts six cells after its bullet), to the grid's left edge or
-// the nearest window border; one tap per step gates the full match.
+// (the text starts six cells after its bullet), to the grid's left edge,
+// the nearest window border, or two blank cells in a row: the strike's own
+// end-of-text rule, and no `- [x] ` run holds two blanks together. One tap
+// per step gates the full match.
 bool onDoneTask(ivec2 cell) {
+    bool prevBlank = false;
     for (int j = 1; j < BOX_STRIKE_SCAN + 6; ++j) {
         ivec2 bullet = cell - ivec2(j, 0);
         if (bullet.x < 0) return false;
@@ -374,6 +377,10 @@ bool onDoneTask(ivec2 cell) {
         // A window separator or float border: the cells beyond it belong
         // to another window's line.
         if (isBorderCp(b)) return false;
+        // A space only: 0 is the right half of a wide glyph, not a gap.
+        bool blank = b == 0x20u;
+        if (blank && prevBlank) return false;
+        prevBlank = blank;
         if (j < 6 || (b != 0x2Du && b != 0x2Au && b != 0x2Bu)) continue;
         if (taskRunAt(bullet) == 2) return true;
     }
@@ -393,18 +400,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     // ---- task checkboxes -------------------------------------------------
     // This fragment may sit in any of the five cells of a `- [?]` run; try
-    // each start. Everything is measured in the space the row is drawn in
-    // (`p`): mid smooth-scroll a row sits zonvieRowOffset below its grid
-    // rect, and the box has to ride with its text. The paper is the corner
-    // of the fragment's own cell, sampled where that cell is drawn.
-    if (ENABLE_BOXES && iCellSize.x > 0.0 && iCellSize.y > 0.0) {
-        vec2 cs = iCellSize;
-        float rowOff = zonvieRowOffset(fragCoord);
-        vec2 p = fragCoord - vec2(0.0, rowOff);
-        vec2 c0 = floor((p - iGridOrigin) / cs);
-        ivec2 cell = ivec2(c0);
-        vec2 cellMin = iGridOrigin + c0 * cs;
-        vec3 paper = cornerAt(cellMin + vec2(0.0, rowOff), cs);
+    // each start. zonvieCellGeom gives the fragment's cell where it is drawn
+    // (mid smooth-scroll, or in a window with its own font and cell size),
+    // and the box rides with it. The paper is the corner of that cell.
+    ivec2 cell;
+    vec2 cellMin, cs;
+    if (ENABLE_BOXES && zonvieCellGeom(fragCoord, cell, cellMin, cs)) {
+        vec2 p = fragCoord;
+        vec3 paper = cornerAt(cellMin, cs);
         for (int k = 0; k < 5; ++k) {
             ivec2 bullet = cell - ivec2(k, 0);
             if (bullet.x < 0) break;
@@ -418,20 +421,29 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             break;
         }
         // Done-task text: fade the ink and strike through it. The line
-        // stops after two blank cells in a row, where the text ends.
-        if (BOX_STRIKE && base == sharp.rgb && onDoneTask(cell)) {
+        // stops after two blank cells in a row, where the text ends. The
+        // scan for the task run is the expensive part, so a fragment that
+        // could show neither fade nor line (no ink, blank cell, blank or
+        // border next) decides from two taps and skips it.
+        if (BOX_STRIKE && base == sharp.rgb) {
             bool ink = distance(sharp.rgb, paper) > BOX_INK_THRESH;
             uint here = zonvieCellTextAt(cell);
             uint next = zonvieCellTextAt(cell + ivec2(1, 0));
             bool textHere = !isBorderCp(here) &&
                             (ink || !isBlankCp(here) || (!isBlankCp(next) && !isBorderCp(next)));
-            if (ink) base = mix(sharp.rgb, paper, BOX_STRIKE_FADE);
-            float relY = (p.y - cellMin.y) / cs.y;
-            if (textHere && abs(relY - BOX_STRIKE_Y) < BOX_STRIKE_W) {
-                base = mix(paper, vec3(0.45), 0.5);
+            if ((ink || textHere) && onDoneTask(cell)) {
+                if (ink) base = mix(sharp.rgb, paper, BOX_STRIKE_FADE);
+                float relY = (p.y - cellMin.y) / cs.y;
+                if (textHere && abs(relY - BOX_STRIKE_Y) < BOX_STRIKE_W) {
+                    base = mix(paper, vec3(0.45), 0.5);
+                }
             }
         }
     }
+
+    // The frame as the boxes left it: the glyphs a box painted over are
+    // gone from the picture, so later masks must not treat them as ink.
+    vec3 boxed = base;
 
     // ---- smoke puffs -----------------------------------------------------
     // Gate on the global "last edit" time first so idle frames pay nothing,
@@ -645,13 +657,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                 // Only `tPaper` is used: the streak is drawn in the cursor
                 // colour, and paper is what the background mask needs.
                 vec3 tPaper, tInk;
-                estimatePaperInk(c02, cs2, sharp.rgb, tPaper, tInk);
+                estimatePaperInk(c02, cs2, boxed, tPaper, tInk);
                 // Background pixels only, same rule as the smoke: a pixel
                 // matching either the row's paper or its own cell's
                 // background is background.
                 vec3 corner2 = texture(iChannel0, (iGridOrigin + c02 * cs2 + cs2 * 0.08) / iResolution.xy).rgb;
                 float onBg2 = 1.0 - smoothstep(0.10, 0.25,
-                    min(distance(sharp.rgb, tPaper), distance(sharp.rgb, corner2)));
+                    min(distance(boxed, tPaper), distance(boxed, corner2)));
                 vec3 trailColor = iCurrentCursorColor.rgb;
                 base = mix(base, trailColor, TRAIL_MAX * aLine * onBg2);
             }
