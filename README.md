@@ -51,6 +51,8 @@ const bool ENABLE_BOXES = true;  // task checkboxes
 
 The cursor's shear and stretch are part of how the shader draws the cursor, so they always stay on.
 
+The character under a block cursor stays readable: it is painted in the colour Neovim draws text on the cursor (the `Cursor` highlight's foreground, or the default background). Under the cursor a checkbox or faded done text gives way to the character that is really there. Set `CURSOR_SHOW_GLYPH` to `false` for a solid cursor.
+
 ## Tuning
 
 The constants at the top of `thymer.glsl` control each effect: `PUFF_*` for the smoke, `TRAIL_*` for the jump trail, `SHEAR_*` / `STRETCH_MAX` for the cursor motion, and `GLOW_*` for the glow.

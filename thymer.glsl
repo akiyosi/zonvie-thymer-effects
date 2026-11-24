@@ -34,9 +34,8 @@
 // The marker above tells Zonvie to skip its native cursor pass for EVERY
 // cursor shape, so this shader draws the cursor. `guicursor` still decides
 // the shape: it arrives as iCurrentCursorStyle and is honoured below. The
-// one thing lost versus the native pass is the glyph under a block cursor,
-// which the native pass painted in the cell background colour; a
-// post-process shader does not know that colour, so a block is drawn solid.
+// glyph under a block cursor is painted in iCursorText, as the native pass
+// paints it (CURSOR_SHOW_GLYPH).
 
 // ---- switches ------------------------------------------------------------
 // Turn each effect on or off. The cursor's shear and stretch are part of
@@ -169,6 +168,7 @@ const float SHEAR_MAX        = 0.10;  // shear amount / cursor height
 const float SHEAR_DIR        = 1.0;   // +1: top edge leads
 const float STRETCH_MAX      = 0.55;  // symmetric stretch while moving, fraction of width
 const float CURSOR_RADIUS_PX = 1.5;
+const bool  CURSOR_SHOW_GLYPH = true;  // paint the glyph under the cursor in the cursor's text colour
 // Brightness of the cursor during the off phase of a `guicursor` blink, so
 // the blink dims the cursor instead of removing it; 0 hides it as Neovim
 // does. The colour is scaled, not blended with the background: Thymer's
@@ -763,19 +763,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         // opaque, so a theme that never filled the alpha still shows a cursor.
         float ca = iCurrentCursorColor.a > 0.0 ? iCurrentCursorColor.a : 1.0;
 
-        // Solid cursor colour for every shape.
-        //
-        // A block hides the glyph underneath. The native pass avoided that by
-        // painting the glyph in the cell's background colour, but a
-        // post-process shader does not know that colour. Two heuristics were
-        // tried and both failed visibly: probing two pixels above the rect hit
-        // the ext-cmdline surface's padding and painted the cursor solid
-        // black, and averaging the rect's four corners misread the background
-        // often enough to paint the whole cursor in it, making the cursor
-        // vanish in Normal mode. Guessing the colour is worse than not drawing
-        // the glyph, so this draws none. Restoring the glyph properly needs
-        // the real colour as a uniform (Ghostty exposes iCursorText).
+        // The cursor colour, with the glyph under it kept readable: where
+        // the cursor covers a glyph, that part is painted in the colour
+        // Neovim draws text on the cursor (iCursorText) instead, as the
+        // native pass does. How much of a pixel is glyph is read off the
+        // frame against its cell's own foreground and background, which
+        // Zonvie gives exactly; nothing is guessed from neighbouring pixels.
+        // It is read off the frame as Neovim drew it, so under the cursor a
+        // box or faded done text gives way to the character that is really
+        // there.
         vec3 cursorPaint = iCurrentCursorColor.rgb * cursorLevel;
+        ivec2 gCell;
+        vec2 gMin, gCs;
+        if (CURSOR_SHOW_GLYPH && zonvieCellGeom(fragCoord, gCell, gMin, gCs)) {
+            vec3 cellBg = zonvieCellBgAt(gCell);
+            vec3 axis = zonvieCellFgAt(gCell) - cellBg;
+            float glyph = clamp(dot(sharp.rgb - cellBg, axis) / max(dot(axis, axis), 1e-4), 0.0, 1.0);
+            cursorPaint = mix(cursorPaint, iCursorText * cursorLevel, glyph);
+        }
         float cover = a * ca;
         base = mix(base, cursorPaint, cover);
         // Opaque where it is drawn, like the smoke: on a translucent window
