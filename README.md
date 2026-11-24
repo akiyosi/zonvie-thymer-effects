@@ -6,6 +6,7 @@ A custom GLSL post-process shader for [Zonvie](https://github.com/akiyosi/zonvie
 - The cursor shears and stretches as it moves, and leaves a brief streak when it jumps.
 - On dark themes, the cursor casts a gentle glow that follows Neovim's cursor blink.
 - Markdown task items (`- [ ]`, `- [x]`, `- [!]`) draw as rounded checkboxes, with a tick on done tasks and a red `!` on urgent ones.
+- Markdown tables draw with ruled lines: a rounded frame, a rule under the header, and lines between the columns and rows.
 
 ## Requirements
 
@@ -38,6 +39,16 @@ The boxes follow the text through a smooth scroll (Zonvie's `iRowOffset` input).
 
 `BOX_COLOR_*`, `BOX_SIZE` and `BOX_STRIKE_*` in `thymer.glsl` tune the drawing.
 
+## Tables
+
+Markdown tables are drawn from the text of the cells too, with nothing installed on the Neovim side. A table is pipes standing in a column over two rows or more, whose second row is the delimiter row (`|---|:--:|`). Each `|` is repainted as a vertical rule and the delimiter row as the rule under the header; a rounded frame, a tinted header band and faint lines between the body rows are drawn round the cells.
+
+The text of the cells is left where it is, so a table reads as drawn only when its source is aligned, with a pipe at both ends of each row. A row whose pipes have moved out of line drops back to plain text and the table closes above it, which is what you see while typing in a cell until the table is realigned. The delimiter row shows its own text while the cursor is on it. Column alignment (`:--:`) is not shown.
+
+A table is recognised by its header, so once the header has scrolled out of the window the rest is plain text again, unless the pipes run up to the first row of the Neovim grid: then it is drawn without a header.
+
+`TABLE_COLOR`, `TABLE_ALPHA`, `TABLE_HEAD_FILL`, `TABLE_LINE_W` and `TABLE_RADIUS` in `thymer.glsl` tune the drawing.
+
 ## Turning effects on and off
 
 Each effect has a switch at the top of `thymer.glsl`. Set one to `false` to turn that effect off:
@@ -47,11 +58,12 @@ const bool ENABLE_SMOKE = true;  // smoke puffs on typed and deleted glyphs
 const bool ENABLE_TRAIL = true;  // streak when the cursor jumps
 const bool ENABLE_GLOW  = true;  // cursor glow on dark themes
 const bool ENABLE_BOXES = true;  // task checkboxes
+const bool ENABLE_TABLES = true; // Markdown tables drawn with ruled lines
 ```
 
 The cursor's shear and stretch are part of how the shader draws the cursor, so they always stay on.
 
-The character under a block cursor stays readable: it is painted in the colour Neovim draws text on the cursor (the `Cursor` highlight's foreground, or the default background). Under the cursor a checkbox or faded done text gives way to the character that is really there. Set `CURSOR_SHOW_GLYPH` to `false` for a solid cursor.
+The character under a block cursor stays readable: it is painted in the colour Neovim draws text on the cursor (the `Cursor` highlight's foreground, or the default background). Under the cursor a checkbox, a table rule or faded done text gives way to the character that is really there. Set `CURSOR_SHOW_GLYPH` to `false` for a solid cursor.
 
 ## Tuning
 

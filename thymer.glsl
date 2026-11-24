@@ -44,6 +44,7 @@ const bool ENABLE_SMOKE = true;  // smoke puffs on typed and deleted glyphs
 const bool ENABLE_TRAIL = true;  // streak when the cursor jumps
 const bool ENABLE_GLOW  = true;  // cursor glow on dark themes
 const bool ENABLE_BOXES = true;  // task checkboxes
+const bool ENABLE_TABLES = true; // Markdown tables drawn with ruled lines
 
 // ---- tunables -------------------------------------------------------------
 
@@ -67,6 +68,23 @@ const vec3  BOX_COLOR_URGENT = vec3(0.72, 0.20, 0.20);   // red outline and "!"
 const float BOX_RADIUS       = 0.16;   // corner radius / box side
 const float BOX_STROKE       = 0.14;   // outline width / box side
 const float BOX_AA_PX        = 0.9;    // edge softness in pixels
+
+// Markdown tables. A table is found by its text alone: pipes standing in a
+// column over two rows or more, whose second row is the delimiter row
+// (`|---|:--:|`). The pipes are repainted as vertical rules, the delimiter
+// row as the rule under the header, and a frame and row lines are drawn
+// round the cells; the cells' own text is left where it is, so the table
+// reads as drawn only when its source is aligned.
+const int   TABLE_ROWS       = 64;     // rows a column of pipes is followed, each way
+const int   TABLE_COLS       = 64;     // cells a fragment looks sideways for its table's pipes
+const vec3  TABLE_COLOR      = vec3(0.50, 0.56, 0.60);   // the rules, before blending
+const float TABLE_ALPHA      = 0.80;   // how much of TABLE_COLOR a rule is
+const float TABLE_ROW_ALPHA  = 0.30;   // ... and a line between two body rows
+const float TABLE_HEAD_FILL  = 0.10;   // how far the header band is tinted toward TABLE_COLOR
+const float TABLE_LINE_W     = 0.045;  // rule width / cell height
+const float TABLE_HEAD_W     = 1.5;    // the rule under the header / an ordinary rule
+const float TABLE_RADIUS     = 0.42;   // frame corner radius / cell width
+const float TABLE_AA_PX      = 0.7;    // edge softness in pixels
 
 // Smoke puffs.
 const float PUFF_LIFE_MIN_S  = 0.10;  // per-puff life is drawn uniformly from [MIN, MAX]
@@ -387,6 +405,60 @@ bool onDoneTask(ivec2 cell) {
     return false;
 }
 
+bool isPipeAt(ivec2 c) {
+    return zonvieCellTextAt(c) == 0x7Cu;  // |
+}
+
+// From the pipe at `pipe`, are the cells on its `dir` side, up to the next
+// pipe, a delimiter cell: hyphens, with optional colons and blanks?
+bool delimiterRun(ivec2 pipe, int dir) {
+    bool dash = false;
+    for (int k = 1; k <= TABLE_COLS; ++k) {
+        uint t = zonvieCellTextAt(pipe + ivec2(dir * k, 0));
+        if (t == 0x7Cu) return dash;
+        if (t == 0x2Du) dash = true;                   // -
+        else if (t != 0x3Au && t != 0x20u) return false;  // : and blank
+    }
+    return false;
+}
+
+// The table the pipe at `pipe` stands in: its first and last row. Returns 0
+// when the column of pipes is not a table, 1 for a table (the header is row
+// r0, the delimiter row r0 + 1), 2 for a column that runs off the top of
+// the grid: a table whose header has scrolled away, drawn without one.
+int tableAt(ivec2 pipe, out int r0, out int r1) {
+    r0 = pipe.y;
+    r1 = pipe.y;
+    for (int k = 1; k < TABLE_ROWS; ++k) {
+        if (!isPipeAt(ivec2(pipe.x, pipe.y - k))) break;
+        r0 = pipe.y - k;
+    }
+    for (int k = 1; k < TABLE_ROWS; ++k) {
+        if (!isPipeAt(ivec2(pipe.x, pipe.y + k))) break;
+        r1 = pipe.y + k;
+    }
+    if (r1 == r0) return 0;
+    ivec2 d = ivec2(pipe.x, r0 + 1);
+    if (delimiterRun(d, 1) || delimiterRun(d, -1)) return 1;
+    return (r0 == 0 && r1 >= 2) ? 2 : 0;
+}
+
+// Is there a pipe on the `dir` side of `c` in its row, before a window
+// border or the grid's edge?
+bool pipeBeside(ivec2 c, int dir, out int at) {
+    for (int k = 1; k <= TABLE_COLS; ++k) {
+        ivec2 q = c + ivec2(dir * k, 0);
+        if (q.x < 0) return false;
+        uint t = zonvieCellTextAt(q);
+        if (t == 0x7Cu) {
+            at = q.x;
+            return true;
+        }
+        if (isBorderCp(t)) return false;
+    }
+    return false;
+}
+
 // ---- main -----------------------------------------------------------------
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
@@ -441,8 +513,138 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         }
     }
 
-    // The frame as the boxes left it: the glyphs a box painted over are
-    // gone from the picture, so later masks must not treat them as ink.
+    // ---- Markdown tables ---------------------------------------------------
+    // A fragment is in a table when its cell is one of the table's pipes,
+    // or lies between two pipes of a table row. The table is read off the
+    // pipe at or left of the cell.
+    // A window separator or a float's border is never part of a table: the
+    // text plane is shared, so its cell can sit between a pipe of the window
+    // on its left and one of the window on its right.
+    if (ENABLE_TABLES && zonvieCellGeom(fragCoord, cell, cellMin, cs) && !isBorderCp(zonvieCellTextAt(cell))) {
+        vec2 p = fragCoord;
+        bool onPipe = isPipeAt(cell);
+        int lx = cell.x, rx = cell.x;
+        bool leftPipe = pipeBeside(cell, -1, lx);
+        int r0 = 0, r1 = 0;
+        int kind = 0;
+        bool rightPipe = false;
+        if (onPipe || leftPipe) {
+            rightPipe = pipeBeside(cell, 1, rx);
+            // A pipe is read with its neighbours in the row, a cell with
+            // the pipes either side of it, and only the rows those columns
+            // of pipes share are a table: a row whose pipes have moved out
+            // of line drops back to plain text, and the table closes above
+            // it. A neighbour that is not a pipe of this same table (a
+            // window separator drawn as `|`, a stray pipe) does not count,
+            // so the table still ends where it ends.
+            int q0 = 0, q1 = 0;
+            if (onPipe) {
+                kind = tableAt(cell, r0, r1);
+                int rows = r1;
+                if (kind != 0 && rightPipe) {
+                    rightPipe = tableAt(ivec2(rx, cell.y), q0, q1) == kind && q0 == r0;
+                    if (rightPipe) rows = min(rows, q1);
+                }
+                if (kind != 0 && leftPipe) {
+                    leftPipe = tableAt(ivec2(lx, cell.y), q0, q1) == kind && q0 == r0;
+                    if (leftPipe) rows = min(rows, q1);
+                }
+                if (!leftPipe && !rightPipe) kind = 0;
+                r1 = rows;
+            } else if (rightPipe) {
+                kind = tableAt(ivec2(lx, cell.y), r0, r1);
+                if (kind != 0 && (tableAt(ivec2(rx, cell.y), q0, q1) != kind || q0 != r0)) kind = 0;
+                r1 = min(r1, q1);
+            }
+        }
+        if (kind != 0) {
+            vec3 paper = cornerAt(cellMin, cs);
+            bool first = onPipe && !leftPipe;
+            bool last = onPipe && !rightPipe;
+            bool top = cell.y == r0;
+            bool bottom = cell.y == r1;
+            bool head = kind == 1 && cell.y == r0;
+            // The delimiter row keeps its text while the cursor is on it,
+            // so its colons can be edited.
+            ivec2 curCell;
+            vec2 curMin, curCs;
+            bool curHere = zonvieCellGeom(iCurrentCursor.xy + vec2(0.5 * iCurrentCursor.z, -0.5 * iCurrentCursor.w),
+                                          curCell, curMin, curCs) && curCell.y == cell.y;
+            // The delimiter row: the second row of a table, or the first
+            // row left of one whose header alone has scrolled away.
+            int ruleRow = kind == 1 ? r0 + 1 : -1;
+            ivec2 topPipe = ivec2(onPipe ? cell.x : lx, r0);
+            if (kind == 2 && (delimiterRun(topPipe, 1) || delimiterRun(topPipe, -1))) ruleRow = r0;
+            bool rule = cell.y == ruleRow && !curHere;
+            bool bodyLine = !bottom && !head && cell.y != ruleRow;
+
+            float w = max(1.0, TABLE_LINE_W * cs.y);
+            float rad = TABLE_RADIUS * cs.x;
+            float xc = cellMin.x + 0.5 * cs.x;
+            float xl = first ? xc : cellMin.x - 1.0;
+            float xr = last ? xc : cellMin.x + cs.x + 1.0;
+            float yT = cellMin.y + 0.5 * w;
+            float yB = cellMin.y + cs.y - 0.5 * w;
+            float yC = cellMin.y + 0.5 * cs.y;
+            bool corner = first || last;
+            // The centre of the frame's corner arc in this cell, if it has one.
+            float ax = first ? xc + rad : xc - rad;
+            float sx = first ? 1.0 : -1.0;
+
+            // Outside the frame: the outer half of an end pipe's cell, and
+            // the corner beyond the arc.
+            bool outside = (first && p.x < xc - 0.5 * w) || (last && p.x > xc + 0.5 * w);
+            if (corner && top && kind == 1 && (p.x - ax) * sx < 0.0 && p.y < yT + rad &&
+                length(p - vec2(ax, yT + rad)) > rad + 0.5 * w) outside = true;
+            if (corner && bottom && (p.x - ax) * sx < 0.0 && p.y > yB - rad &&
+                length(p - vec2(ax, yB - rad)) > rad + 0.5 * w) outside = true;
+
+            if (onPipe || rule) base = paper;
+            if (!outside && (head || (rule && p.y < yC))) base = mix(base, TABLE_COLOR, TABLE_HEAD_FILL);
+
+            float d = 1e5;      // distance to the frame and the cells' rules
+            float dHead = 1e5;  // ... to the rule under the header
+            float dRow = 1e5;   // ... to a line between body rows
+            bool arcTop = corner && top && kind == 1;
+            bool arcBottom = corner && bottom;
+            if (onPipe) {
+                float ya = arcTop ? yT + rad : (top && kind == 1 ? yT : cellMin.y - 1.0);
+                float yb = arcBottom ? yB - rad : (bottom ? yB : cellMin.y + cs.y + 1.0);
+                d = sdSegment(p, vec2(xc, ya), vec2(xc, yb));
+            }
+            if (top && kind == 1) {
+                if (arcTop) {
+                    vec2 c = vec2(ax, yT + rad);
+                    if ((p.x - ax) * sx <= 0.0 && p.y <= c.y) d = min(d, abs(length(p - c) - rad));
+                    d = min(d, sdSegment(p, vec2(ax, yT), vec2(first ? xr : xl, yT)));
+                } else {
+                    d = min(d, sdSegment(p, vec2(xl, yT), vec2(xr, yT)));
+                }
+            }
+            if (bottom) {
+                if (arcBottom) {
+                    vec2 c = vec2(ax, yB - rad);
+                    if ((p.x - ax) * sx <= 0.0 && p.y >= c.y) d = min(d, abs(length(p - c) - rad));
+                    d = min(d, sdSegment(p, vec2(ax, yB), vec2(first ? xr : xl, yB)));
+                } else {
+                    d = min(d, sdSegment(p, vec2(xl, yB), vec2(xr, yB)));
+                }
+            }
+            if (rule) dHead = sdSegment(p, vec2(xl, yC), vec2(xr, yC));
+            if (bodyLine) dRow = sdSegment(p, vec2(xl, yB), vec2(xr, yB));
+
+            vec3 lineCol = mix(paper, TABLE_COLOR, TABLE_ALPHA);
+            float aa = TABLE_AA_PX;
+            base = mix(base, mix(paper, TABLE_COLOR, TABLE_ROW_ALPHA), 1.0 - smoothstep(0.5 * w - aa, 0.5 * w + aa, dRow));
+            base = mix(base, lineCol, 1.0 - smoothstep(0.5 * w - aa, 0.5 * w + aa, d));
+            float wh = TABLE_HEAD_W * w;
+            base = mix(base, lineCol, 1.0 - smoothstep(0.5 * wh - aa, 0.5 * wh + aa, dHead));
+        }
+    }
+
+    // The frame as the boxes and tables left it: the glyphs they painted
+    // over are gone from the picture, so later masks must not treat them as
+    // ink.
     vec3 boxed = base;
 
     // ---- smoke puffs -----------------------------------------------------
@@ -770,8 +972,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         // frame against its cell's own foreground and background, which
         // Zonvie gives exactly; nothing is guessed from neighbouring pixels.
         // It is read off the frame as Neovim drew it, so under the cursor a
-        // box or faded done text gives way to the character that is really
-        // there.
+        // box, a table rule or faded done text gives way to the character
+        // that is really there.
         vec3 cursorPaint = iCurrentCursorColor.rgb * cursorLevel;
         ivec2 gCell;
         vec2 gMin, gCs;
