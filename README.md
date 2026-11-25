@@ -7,6 +7,7 @@ A custom GLSL post-process shader for [Zonvie](https://github.com/akiyosi/zonvie
 - On dark themes, the cursor casts a gentle glow that follows Neovim's cursor blink.
 - Markdown task items (`- [ ]`, `- [x]`, `- [!]`) draw as rounded checkboxes, with a tick on done tasks and a red `!` on urgent ones.
 - Markdown tables draw with ruled lines: a rounded frame, a rule under the header, and lines between the columns and rows.
+- Markdown headings (`#`, `##`, `###`) draw larger, into the blank line beside them.
 
 ## Requirements
 
@@ -53,6 +54,16 @@ The rules and the header band take the colour the colorscheme gives the pipes th
 
 `TABLE_ALPHA`, `TABLE_ROW_ALPHA`, `TABLE_HEAD_FILL`, `TABLE_LINE_W` and `TABLE_RADIUS` in `thymer.glsl` tune the drawing.
 
+## Headings
+
+A heading line is drawn larger: `#` at 1.7 times, `##` at 1.4, `###` at 1.2. It grows into the blank line below it, or into the one above when only that one is blank, so the page is not rearranged: no other line moves or changes size. A heading with text directly above and below it has no room and stays as it is.
+
+Everything on the line grows with it, the cursor and the smoke of what is typed there included. The line is scaled about the left edge of its own text, so the sign and number columns stay as they are. The `#` marks are kept and scaled with the rest.
+
+Headings are found by Tree-sitter's captures (`@markup.heading.1` to `.3`), so the buffer needs Tree-sitter highlighting for Markdown; without it headings stay their own size. Only the first 16 cells of a row are looked at: a heading indented further, or one in a window that does not start at the left edge of the Neovim grid (the right half of a vertical split), is not enlarged. The enlarged letters are the ones Neovim drew, stretched, so they are a little softer than text set at that size.
+
+`HEAD_SCALE_1`, `HEAD_SCALE_2` and `HEAD_SCALE_3` in `thymer.glsl` set the sizes. One blank line is all the room there is, so a scale above 2 is cut off.
+
 ## Turning effects on and off
 
 Each effect has a switch at the top of `thymer.glsl`. Set one to `false` to turn that effect off:
@@ -63,6 +74,7 @@ const bool ENABLE_TRAIL = true;  // streak when the cursor jumps
 const bool ENABLE_GLOW  = true;  // cursor glow on dark themes
 const bool ENABLE_BOXES = true;  // task checkboxes
 const bool ENABLE_TABLES = true; // Markdown tables drawn with ruled lines
+const bool ENABLE_HEADINGS = true; // Markdown headings drawn larger
 ```
 
 The cursor's shear and stretch are part of how the shader draws the cursor, so they always stay on.

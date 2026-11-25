@@ -37,6 +37,10 @@
 // glyph under a block cursor is painted in iCursorText, as the native pass
 // paints it (CURSOR_SHOW_GLYPH).
 
+// Headings are found by Tree-sitter's captures, read as bits 0..2 of a
+// cell's group mask in the order declared here.
+// @zonvie-hl-groups: @markup.heading.1 @markup.heading.2 @markup.heading.3
+
 // ---- switches ------------------------------------------------------------
 // Turn each effect on or off. The cursor's shear and stretch are part of
 // drawing the cursor and always stay on.
@@ -45,8 +49,21 @@ const bool ENABLE_TRAIL = true;  // streak when the cursor jumps
 const bool ENABLE_GLOW  = true;  // cursor glow on dark themes
 const bool ENABLE_BOXES = true;  // task checkboxes
 const bool ENABLE_TABLES = true; // Markdown tables drawn with ruled lines
+const bool ENABLE_HEADINGS = true; // Markdown headings drawn larger
 
 // ---- tunables -------------------------------------------------------------
+
+// Markdown headings. A heading line is drawn larger, into the blank line
+// below it (or, when only the line above is blank, into that one): the
+// page is not rearranged, and no other line moves or changes size. A
+// heading with text on both sides has no room and stays as it is. The line
+// is scaled about the left edge of its own text, so the sign and number
+// columns stay as they are. Everything on the line is scaled with it: the
+// cursor, the smoke of what is typed there.
+const float HEAD_SCALE_1     = 1.70;  // `#`: at most 2, one blank line being all the room there is
+const float HEAD_SCALE_2     = 1.40;  // `##`
+const float HEAD_SCALE_3     = 1.20;  // `###`
+const int   HEAD_COLS        = 16;    // cells of a row read for its heading; all blank, the row counts as blank
 
 // Task checkboxes. Zonvie hands the shader the codepoint of every cell
 // (iCellText), so a task prefix is matched by its text, not its pixels: a
@@ -463,9 +480,88 @@ bool pipeBeside(ivec2 c, int dir, out int at) {
     return false;
 }
 
+// What the first cells of `row` hold: the level of its heading (1 to 3, 0
+// for none) with the column the heading's text starts at, and whether they
+// are all blank. One pass with no way out of the loop, and every row asked
+// about is read whole: a loop that can be left early here, or one reached
+// only on some paths, takes Metal's compiler minutes to build.
+void headingRow(int row, out int level, out int col, out bool blank) {
+    level = 0;
+    col = 0;
+    bool any = false;
+    for (int x = 0; x < HEAD_COLS; ++x) {
+        uvec4 c = zonvieCellAt4(ivec2(x, row));
+        uint g = c.w & 7u;
+        if (level == 0 && g != 0u) {
+            level = (g & 1u) != 0u ? 1 : ((g & 2u) != 0u ? 2 : 3);
+            col = x;
+        }
+        any = any || !isBlankCp(c.x);
+    }
+    // Rows past the root grid are other grids' text.
+    bool in_grid = row >= 0 && row < iRootRows;
+    if (!in_grid) level = 0;
+    blank = in_grid && !any;
+}
+
+float headingScale(int level) {
+    return level == 1 ? HEAD_SCALE_1 : (level == 2 ? HEAD_SCALE_2 : HEAD_SCALE_3);
+}
+
+// Where the picture at `fragCoord` comes from: the same place, except in a
+// heading's enlarged line. That line covers the heading's own row and the
+// part of the blank row it grows into; a pixel there shows the heading row
+// scaled about its fixed edge (its top when it grows down, its bottom when
+// it grows up) and about the left edge of its text.
+vec2 headingSource(vec2 fragCoord) {
+    ivec2 cell;
+    vec2 cellMin, cs;
+    bool on_grid = zonvieCellGeom(fragCoord, cell, cellMin, cs) && cell.y < iRootRows;
+
+    // This row, and the rows a heading here could grow into or one beside
+    // it could grow from.
+    int level, col, level_up, col_up, level_down, col_down, unused_level, unused_col;
+    bool blank, blank_up, blank_down, blank_down2;
+    headingRow(cell.y, level, col, blank);
+    headingRow(cell.y - 1, level_up, col_up, blank_up);
+    headingRow(cell.y + 1, level_down, col_down, blank_down);
+    headingRow(cell.y + 2, unused_level, unused_col, blank_down2);
+
+    // The heading whose enlarged line may cover this pixel, the top of its
+    // row and which way it grows.
+    int lvl = 0;
+    int from = 0;
+    float top = cellMin.y;
+    bool down = true;
+    if (level > 0 && (blank_down || blank_up)) {
+        lvl = level;
+        from = col;
+        down = blank_down;
+    } else if (level == 0 && blank && level_up > 0) {
+        lvl = level_up;
+        from = col_up;
+        top = cellMin.y - cs.y;
+    } else if (level == 0 && blank && level_down > 0 && !blank_down2) {
+        // The heading below grows up into this row only when it cannot
+        // grow down.
+        lvl = level_down;
+        from = col_down;
+        top = cellMin.y + cs.y;
+        down = false;
+    }
+
+    float k = headingScale(lvl);
+    float left = iGridOrigin.x + float(from) * cs.x;
+    float fixed_y = down ? top : top + cs.y;
+    vec2 src = vec2(left + (fragCoord.x - left) / k, fixed_y + (fragCoord.y - fixed_y) / k);
+    bool inside = on_grid && lvl > 0 && fragCoord.x >= left && src.y >= top && src.y < top + cs.y;
+    return inside ? src : fragCoord;
+}
+
 // ---- main -----------------------------------------------------------------
 
-void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+// The frame at `fragCoord` with every effect but the headings' enlargement.
+void thymerImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
 
     vec4 sharp = texture(iChannel0, uv);
@@ -1002,4 +1098,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     }
 
     fragColor = vec4(base, alpha);
+}
+
+// Everything above is worked out where the picture comes from, so a
+// heading takes its cursor, its smoke and its colours along as it grows.
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    thymerImage(fragColor, ENABLE_HEADINGS ? headingSource(fragCoord) : fragCoord);
 }
