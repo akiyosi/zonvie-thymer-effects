@@ -54,7 +54,13 @@ const bool ENABLE_TABLES = true; // Markdown tables drawn with ruled lines
 // blank before the bullet. The five cells from the bullet to `]` are
 // repainted as one box on the paper colour of their row, and the text of a
 // done task is faded and struck through.
-const bool  BOX_STRIKE       = true;   // grey out and strike through done tasks
+// The colours are the colorscheme's. An open box is drawn in the colour its
+// `[` has (`@markup.list.unchecked` where Tree-sitter highlights Markdown).
+// A done box and the strike through its text take the default text colour,
+// not the colour of `[x]`: colorschemes paint that one as a status (green in
+// many), which reads as a second accent beside the text. `- [!]` is not
+// Markdown and a colorscheme has no colour for it, so that one is fixed.
+const bool  BOX_STRIKE       = true;   // fade and strike through done tasks
 const int   BOX_STRIKE_SCAN  = 240;    // how far left a fragment looks for its `- [x]` (stops at the grid's edge)
 const float BOX_STRIKE_FADE  = 0.45;   // how far done text fades toward the paper
 const float BOX_STRIKE_Y     = 0.57;   // strike line centre / cell height
@@ -62,9 +68,7 @@ const float BOX_STRIKE_W     = 0.035;  // strike line half width / cell height
 const float BOX_INK_THRESH   = 0.15;   // colour distance from paper that counts as ink (fading only)
 const float BOX_SIZE         = 0.62;   // box side / cell height
 const float BOX_CENTRE       = 0.68;   // box centre / five-cell width
-const vec3  BOX_COLOR_OPEN   = vec3(0.25, 0.60, 0.60);   // teal outline
-const vec3  BOX_COLOR_DONE   = vec3(0.25, 0.60, 0.60);   // teal fill, white tick
-const vec3  BOX_COLOR_URGENT = vec3(0.72, 0.20, 0.20);   // red outline and "!"
+const vec3  BOX_COLOR_URGENT = vec3(0.72, 0.20, 0.20);   // `- [!]`: red outline and "!"
 const float BOX_RADIUS       = 0.16;   // corner radius / box side
 const float BOX_STROKE       = 0.14;   // outline width / box side
 const float BOX_AA_PX        = 0.9;    // edge softness in pixels
@@ -75,12 +79,13 @@ const float BOX_AA_PX        = 0.9;    // edge softness in pixels
 // row as the rule under the header, and a frame and row lines are drawn
 // round the cells; the cells' own text is left where it is, so the table
 // reads as drawn only when its source is aligned.
+// The rules take the colour the colorscheme gives the pipes they replace,
+// thinned toward the paper.
 const int   TABLE_ROWS       = 64;     // rows a column of pipes is followed, each way
 const int   TABLE_COLS       = 64;     // cells a fragment looks sideways for its table's pipes
-const vec3  TABLE_COLOR      = vec3(0.50, 0.56, 0.60);   // the rules, before blending
-const float TABLE_ALPHA      = 0.80;   // how much of TABLE_COLOR a rule is
-const float TABLE_ROW_ALPHA  = 0.30;   // ... and a line between two body rows
-const float TABLE_HEAD_FILL  = 0.10;   // how far the header band is tinted toward TABLE_COLOR
+const float TABLE_ALPHA      = 0.55;   // how much of the pipes' colour a rule is
+const float TABLE_ROW_ALPHA  = 0.22;   // ... and a line between two body rows
+const float TABLE_HEAD_FILL  = 0.08;   // how far the header band is tinted toward that colour
 const float TABLE_LINE_W     = 0.045;  // rule width / cell height
 const float TABLE_HEAD_W     = 1.5;    // the rule under the header / an ordinary rule
 const float TABLE_RADIUS     = 0.42;   // frame corner radius / cell width
@@ -350,9 +355,9 @@ int taskRunAt(ivec2 bullet) {
 }
 
 // Paint the task box for the cell with top-left `cellMin`. `q` is the
-// fragment's offset from the cell centre in pixels. Returns the painted
-// colour over `paper`.
-vec3 paintBox(int kind, vec2 q, float side, vec3 paper) {
+// fragment's offset from the cell centre in pixels, `ink` the box's colour.
+// Returns the painted colour over `paper`.
+vec3 paintBox(int kind, vec2 q, float side, vec3 paper, vec3 ink) {
     float hs = side * 0.5;
     float aa = BOX_AA_PX;
     float dBox = sdRoundBox(q, vec2(hs), BOX_RADIUS * side);
@@ -360,7 +365,7 @@ vec3 paintBox(int kind, vec2 q, float side, vec3 paper) {
     float ring = fill * smoothstep(-aa, aa, dBox + BOX_STROKE * side);
     vec3 col = paper;
     if (kind == 2) {
-        col = mix(col, BOX_COLOR_DONE, fill);
+        col = mix(col, ink, fill);
         // Tick: two strokes, drawn in the paper colour. +y is down.
         vec2 a = vec2(-0.30, -0.02) * side;
         vec2 b = vec2(-0.08, 0.22) * side;
@@ -368,14 +373,13 @@ vec3 paintBox(int kind, vec2 q, float side, vec3 paper) {
         float dTick = min(sdSegment(q, a, b), sdSegment(q, b, c)) - 0.07 * side;
         col = mix(col, paper, 1.0 - smoothstep(-aa, aa, dTick));
     } else {
-        vec3 inkCol = kind == 3 ? BOX_COLOR_URGENT : BOX_COLOR_OPEN;
-        col = mix(col, inkCol, ring);
+        col = mix(col, ink, ring);
         if (kind == 3) {
             // "!": a bar and a dot.
             float dBar = sdSegment(q, vec2(0.0, -0.28 * side), vec2(0.0, 0.06 * side)) - 0.07 * side;
             float dDot = length(q - vec2(0.0, 0.26 * side)) - 0.08 * side;
             float mark = 1.0 - smoothstep(-aa, aa, min(dBar, dDot));
-            col = mix(col, inkCol, mark);
+            col = mix(col, ink, mark);
         }
     }
     return col;
@@ -489,7 +493,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             float width = 5.0 * cs.x;
             float side = BOX_SIZE * cs.y;
             vec2 q = p - (bulletMin + vec2(width * BOX_CENTRE, cs.y * 0.5));
-            base = paintBox(kind, q, side, paper);
+            vec3 ink = kind == 3 ? BOX_COLOR_URGENT
+                     : kind == 2 ? iForegroundColor
+                     : zonvieCellFgAt(bullet + ivec2(2, 0));
+            base = paintBox(kind, q, side, paper, ink);
             break;
         }
         // Done-task text: fade the ink and strike through it. The line
@@ -507,7 +514,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                 if (ink) base = mix(sharp.rgb, paper, BOX_STRIKE_FADE);
                 float relY = (p.y - cellMin.y) / cs.y;
                 if (textHere && abs(relY - BOX_STRIKE_Y) < BOX_STRIKE_W) {
-                    base = mix(paper, vec3(0.45), 0.5);
+                    base = mix(iForegroundColor, paper, BOX_STRIKE_FADE);
                 }
             }
         }
@@ -559,6 +566,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         }
         if (kind != 0) {
             vec3 paper = cornerAt(cellMin, cs);
+            // The colour of this row's pipe: the one under the fragment, or
+            // the one on its left.
+            vec3 ink = zonvieCellFgAt(ivec2(onPipe ? cell.x : lx, cell.y));
             bool first = onPipe && !leftPipe;
             bool last = onPipe && !rightPipe;
             bool top = cell.y == r0;
@@ -600,7 +610,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                 length(p - vec2(ax, yB - rad)) > rad + 0.5 * w) outside = true;
 
             if (onPipe || rule) base = paper;
-            if (!outside && (head || (rule && p.y < yC))) base = mix(base, TABLE_COLOR, TABLE_HEAD_FILL);
+            if (!outside && (head || (rule && p.y < yC))) base = mix(base, ink, TABLE_HEAD_FILL);
 
             float d = 1e5;      // distance to the frame and the cells' rules
             float dHead = 1e5;  // ... to the rule under the header
@@ -633,9 +643,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             if (rule) dHead = sdSegment(p, vec2(xl, yC), vec2(xr, yC));
             if (bodyLine) dRow = sdSegment(p, vec2(xl, yB), vec2(xr, yB));
 
-            vec3 lineCol = mix(paper, TABLE_COLOR, TABLE_ALPHA);
+            vec3 lineCol = mix(paper, ink, TABLE_ALPHA);
             float aa = TABLE_AA_PX;
-            base = mix(base, mix(paper, TABLE_COLOR, TABLE_ROW_ALPHA), 1.0 - smoothstep(0.5 * w - aa, 0.5 * w + aa, dRow));
+            base = mix(base, mix(paper, ink, TABLE_ROW_ALPHA), 1.0 - smoothstep(0.5 * w - aa, 0.5 * w + aa, dRow));
             base = mix(base, lineCol, 1.0 - smoothstep(0.5 * w - aa, 0.5 * w + aa, d));
             float wh = TABLE_HEAD_W * w;
             base = mix(base, lineCol, 1.0 - smoothstep(0.5 * wh - aa, 0.5 * wh + aa, dHead));

@@ -33,11 +33,13 @@ set guicursor+=a:blinkwait700-blinkoff400-blinkon250
 
 ## Task checkboxes
 
-Markdown task lines are drawn as boxes with nothing installed on the Neovim side. Zonvie hands the shader the text of every cell (`iCellText`), so a `- [ ]`, `- [x]` or `- [!]` (also `*` and `+` bullets, and `X`) preceded by a blank is matched exactly, whatever the font: those five cells are repainted as a rounded box, and the text of a done task is greyed out and struck through. Floating windows are covered too. A task prefix inside a code block or mid-sentence is drawn as a box as well; `arr[x]` or `-[x]-` is not.
+Markdown task lines are drawn as boxes with nothing installed on the Neovim side. Zonvie hands the shader the text of every cell (`iCellText`), so a `- [ ]`, `- [x]` or `- [!]` (also `*` and `+` bullets, and `X`) preceded by a blank is matched exactly, whatever the font: those five cells are repainted as a rounded box, and the text of a done task is faded and struck through. Floating windows are covered too. A task prefix inside a code block or mid-sentence is drawn as a box as well; `arr[x]` or `-[x]-` is not.
 
 The boxes follow the text through a smooth scroll (Zonvie's `iRowOffset` input). The rows being pushed out at the edge of the window during the scroll animation carry no text information, so their boxes disappear for those few frames.
 
-`BOX_COLOR_*`, `BOX_SIZE` and `BOX_STRIKE_*` in `thymer.glsl` tune the drawing.
+The boxes take their colours from the colorscheme. An open box is drawn in the colour its `[` has (`@markup.list.unchecked` where Tree-sitter highlights Markdown). A done box and the line through its text take the default text colour, not the colour of `[x]`, which many colorschemes paint green as a status. `- [!]` is not Markdown and has no colour of its own in a colorscheme, so its red is fixed (`BOX_COLOR_URGENT`).
+
+`BOX_COLOR_URGENT`, `BOX_SIZE` and `BOX_STRIKE_*` in `thymer.glsl` tune the drawing.
 
 ## Tables
 
@@ -47,7 +49,9 @@ The text of the cells is left where it is, so a table reads as drawn only when i
 
 A table is recognised by its header, so once the header has scrolled out of the window the rest is plain text again, unless the pipes run up to the first row of the Neovim grid: then it is drawn without a header.
 
-`TABLE_COLOR`, `TABLE_ALPHA`, `TABLE_HEAD_FILL`, `TABLE_LINE_W` and `TABLE_RADIUS` in `thymer.glsl` tune the drawing.
+The rules and the header band take the colour the colorscheme gives the pipes they replace, thinned toward the background.
+
+`TABLE_ALPHA`, `TABLE_ROW_ALPHA`, `TABLE_HEAD_FILL`, `TABLE_LINE_W` and `TABLE_RADIUS` in `thymer.glsl` tune the drawing.
 
 ## Turning effects on and off
 
